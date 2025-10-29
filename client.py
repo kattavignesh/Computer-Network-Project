@@ -144,13 +144,19 @@ class App:
         self.status = tk.Label(self.root, text="Status: Connecting...", fg="#94a3b8", bg="#0f1720", anchor='w')
         self.status.place(relx=0.01, rely=0.95, relwidth=0.98)
 
+        # server address bar
+        self.server_addr = tk.Label(self.root, text=f"Server: {SERVER_HOST}:{SERVER_PORT}", fg="#94a3b8", bg="#0f1720", anchor='e')
+        self.server_addr.place(relx=0.01, rely=0.92, relwidth=0.98)
+
     def poll_connection(self):
         if self.conn.connected:
             self.status.config(text="Status: Connected to server")
+            self.server_addr.config(text=f"Server: {self.conn.host}:{self.conn.port}")
             # auto refresh shortly after connected
             self.refresh_list()
         else:
             self.status.config(text="Status: Server offline — retrying...")
+            self.server_addr.config(text=f"Server: {self.conn.host}:{self.conn.port}")
         self.root.after(2000, self.poll_connection)
 
     def on_connected(self):
