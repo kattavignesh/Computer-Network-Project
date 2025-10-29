@@ -13,23 +13,50 @@ FILES_DIR = "files"
 os.makedirs(FILES_DIR, exist_ok=True)
 
 # --- Concurrency primitives ---
-_file_locks: Dict[str, threading.Lock] = {}
+class ReadWriteLock:
+    def __init__(self):
+        self._readers = 0
+        self._readers_lock = threading.Lock()
+        self._writers_lock = threading.Lock()
+        self._no_readers = threading.Condition(self._readers_lock)
+
+    def acquire_read(self):
+        with self._readers_lock:
+            self._readers += 1
+
+    def release_read(self):
+        with self._readers_lock:
+            self._readers -= 1
+            if self._readers == 0:
+                self._no_readers.notify_all()
+
+    def acquire_write(self):
+        self._writers_lock.acquire()
+        # wait for active readers to drain
+        with self._readers_lock:
+            while self._readers > 0:
+                self._no_readers.wait()
+
+    def release_write(self):
+        self._writers_lock.release()
+
+_file_rwlocks: Dict[str, ReadWriteLock] = {}
 _file_locks_guard = threading.Lock()
 
-def _get_file_lock(filename: str) -> threading.Lock:
-    # Double-checked creation of a per-file lock
-    lock = _file_locks.get(filename)
+def _get_file_rwlock(filename: str) -> ReadWriteLock:
+    lock = _file_rwlocks.get(filename)
     if lock is None:
         with _file_locks_guard:
-            if filename not in _file_locks:
-                _file_locks[filename] = threading.Lock()
-            lock = _file_locks[filename]
+            if filename not in _file_rwlocks:
+                _file_rwlocks[filename] = ReadWriteLock()
+            lock = _file_rwlocks[filename]
     return lock
 
 def handle_client(client_socket, addr):
     print(f"[+] New connection from {addr}")
     try:
-        client_socket.settimeout(15)
+        # allow long operations; avoid premature timeouts
+        client_socket.settimeout(300)
     except Exception:
         pass
     try:
@@ -55,7 +82,7 @@ def handle_client(client_socket, addr):
             # UPLOAD<SEPARATOR>filename<SEPARATOR>filesize
             elif header.startswith("UPLOAD"):
                 try:
-                    _, filename, filesize = header.split(SEPARATOR)
+                    _, filename, filesize = header.split(SEPARATOR, 2)
                     filesize = int(filesize)
                 except Exception:
                     client_socket.send("ERROR".encode())
@@ -65,8 +92,9 @@ def handle_client(client_socket, addr):
                 path = os.path.join(FILES_DIR, filename)
                 tmp_path = path + ".part"
 
-                lock = _get_file_lock(filename)
-                with lock:
+                rw = _get_file_rwlock(filename)
+                rw.acquire_write()
+                try:
                     received = 0
                     with open(tmp_path, "wb") as f:
                         while received < filesize:
@@ -77,11 +105,13 @@ def handle_client(client_socket, addr):
                             received += len(chunk)
                     # Atomic replace to avoid readers seeing partial file
                     os.replace(tmp_path, path)
+                finally:
+                    rw.release_write()
 
             # DOWNLOAD<SEPARATOR>filename
             elif header.startswith("DOWNLOAD"):
                 try:
-                    _, filename = header.split(SEPARATOR)
+                    _, filename = header.split(SEPARATOR, 1)
                 except Exception:
                     client_socket.send("ERROR".encode())
                     continue
@@ -90,8 +120,9 @@ def handle_client(client_socket, addr):
                     client_socket.send("ERROR".encode())
                     continue
 
-                lock = _get_file_lock(filename)
-                with lock:
+                rw = _get_file_rwlock(filename)
+                rw.acquire_read()
+                try:
                     filesize = os.path.getsize(path)
                     client_socket.send(f"{filename}{SEPARATOR}{filesize}".encode())
                     # wait for client OK
@@ -105,11 +136,13 @@ def handle_client(client_socket, addr):
                             if not bytes_read:
                                 break
                             client_socket.sendall(bytes_read)
+                finally:
+                    rw.release_read()
 
             # DELETE<SEPARATOR>filename
             elif header.startswith("DELETE"):
                 try:
-                    _, filename = header.split(SEPARATOR)
+                    _, filename = header.split(SEPARATOR, 1)
                 except Exception:
                     client_socket.send("ERROR".encode())
                     continue
@@ -118,13 +151,18 @@ def handle_client(client_socket, addr):
                     client_socket.send("ERROR".encode())
                     continue
 
-                lock = _get_file_lock(filename)
-                with lock:
-                    try:
-                        os.remove(path)
-                        client_socket.send("OK".encode())
-                    except Exception:
-                        client_socket.send("ERROR".encode())
+                rw = _get_file_rwlock(filename)
+                rw.acquire_write()
+                try:
+                    # only allow file deletion (no directories)
+                    if os.path.isdir(path):
+                        raise IsADirectoryError(path)
+                    os.remove(path)
+                    client_socket.send("OK".encode())
+                except Exception:
+                    client_socket.send("ERROR".encode())
+                finally:
+                    rw.release_write()
 
             # QUIT
             elif header == "QUIT":
@@ -144,26 +182,6 @@ def start_server():
     server.bind((SERVER_HOST, SERVER_PORT))
     server.listen(20)
     # Derive LAN IP for users to connect from other machines
-    try:
-        _tmp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        _tmp.connect(("8.8.8.8", 80))
-        lan_ip = _tmp.getsockname()[0]
-        _tmp.close()
-    except Exception:
-        lan_ip = "<unknown>"
-    print(f"🚀 Server listening on {SERVER_HOST}:{SERVER_PORT} (LAN IP: {lan_ip}:{SERVER_PORT})")
-    try:
-        while True:
-            client_sock, client_addr = server.accept()
-            t = threading.Thread(target=handle_client, args=(client_sock, client_addr), daemon=True)
-            t.start()
-    except KeyboardInterrupt:
-        print("\nShutting down server.")
-    finally:
-        server.close()
-
-if __name__ == "__main__":
-    start_server()
     try:
         _tmp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         _tmp.connect(("8.8.8.8", 80))
