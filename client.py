@@ -49,6 +49,11 @@ class Connection:
                 try:
                     self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                     self.sock.connect((self.host, self.port))
+                    try:
+                        # avoid blocking the GUI if server stalls
+                        self.sock.settimeout(5)
+                    except Exception:
+                        pass
                     self.connected = True
                     print("[CLIENT] Connected to server")
                     # safe callback if app exists
@@ -92,6 +97,11 @@ class App:
 
         # mapping index -> real filename
         self.file_map = {}
+        self.refreshing = False
+        self._last_progress = -1
+
+        # small helper to safely update UI from worker threads
+        self.ui = lambda fn, *a, **k: self.root.after(0, lambda: fn(*a, **k))
 
         self.setup_ui()
         self.poll_connection()
@@ -150,32 +160,43 @@ class App:
 
     # ---------------- Actions ----------------
     def refresh_list(self):
+        if self.refreshing:
+            return
         if not self.conn.connected:
             messagebox.showwarning("Not connected", "Server not available yet.")
             return
-        try:
-            self.conn.send(b"LIST")
-            data = self.conn.recv(BUFFER_SIZE).decode()
-            self.listbox.delete(0, tk.END)
-            self.file_map = {}  # ✅ store index → filename
 
-            if data == "EMPTY":
-                self.listbox.insert(tk.END, "(No files on server)")
+        def worker_refresh():
+            try:
+                self.conn.send(b"LIST")
+                data = self.conn.recv(BUFFER_SIZE).decode()
+            except Exception as e:
+                self.root.after(0, lambda: messagebox.showerror("Error", f"Failed to refresh: {e}"))
+                self.refreshing = False
                 return
 
-            idx = 0
-            for entry in data.split(","):
-                if not entry.strip():
-                    continue
-                name, size = entry.split("|")
-                icon = ext_icon(name)
-                display = f"{icon}  {name}    ({human_size(int(size))})"
-                self.listbox.insert(tk.END, display)
-                self.file_map[idx] = name  # ✅ store actual filename
-                idx += 1
+            def apply_list(data_str):
+                self.listbox.delete(0, tk.END)
+                self.file_map = {}
+                if data_str == "EMPTY":
+                    self.listbox.insert(tk.END, "(No files on server)")
+                else:
+                    idx_local = 0
+                    for entry in data_str.split(","):
+                        if not entry.strip():
+                            continue
+                        name, size = entry.split("|")
+                        icon = ext_icon(name)
+                        display = f"{icon}  {name}    ({human_size(int(size))})"
+                        self.listbox.insert(tk.END, display)
+                        self.file_map[idx_local] = name
+                        idx_local += 1
+                self.refreshing = False
 
-        except Exception as e:
-            messagebox.showerror("Error", f"Failed to refresh: {e}")
+            self.root.after(0, lambda: apply_list(data))
+
+        self.refreshing = True
+        threading.Thread(target=worker_refresh, daemon=True).start()
 
     def upload_files(self):
         if not self.conn.connected:
@@ -197,8 +218,8 @@ class App:
                     if ready != "READY":
                         raise RuntimeError("Server not ready for upload")
                     sent = 0
-                    self.progress['value'] = 0
-                    self.progress_label.config(text=f"Uploading {filename} ({idx}/{total_files})")
+                    self.ui(self.progress.configure, value=0)
+                    self.ui(self.progress_label.config, text=f"Uploading {filename} ({idx}/{total_files})")
                     with open(path, "rb") as f:
                         while sent < filesize:
                             chunk = f.read(BUFFER_SIZE)
@@ -207,15 +228,17 @@ class App:
                             self.conn.send(chunk)
                             sent += len(chunk)
                             percent = int((sent / filesize) * 100)
-                            self.progress['value'] = percent
+                            if percent != self._last_progress:
+                                self._last_progress = percent
+                                self.ui(self.progress.configure, value=percent)
                     # small pause to show 100%
-                    self.progress['value'] = 100
+                    self.ui(self.progress.configure, value=100)
                     time.sleep(0.2)
                 except Exception as ex:
-                    messagebox.showerror("Upload error", f"{filename}\n{ex}")
+                    self.ui(messagebox.showerror, "Upload error", f"{filename}\n{ex}")
                     return
-            self.progress_label.config(text="All uploads completed ✅")
-            self.refresh_list()
+            self.ui(self.progress_label.config, text="All uploads completed ✅")
+            self.ui(self.refresh_list)
 
         threading.Thread(target=worker, args=(filepaths,), daemon=True).start()
 
@@ -244,15 +267,15 @@ class App:
                 self.conn.send(f"DOWNLOAD{SEPARATOR}{filename}".encode())
                 header = self.conn.recv(BUFFER_SIZE).decode()
                 if header == "ERROR":
-                    messagebox.showerror("Error", "File not found on server.")
+                    self.ui(messagebox.showerror, "Error", "File not found on server.")
                     return
                 fname, fsize = header.split(SEPARATOR)
                 fsize = int(fsize)
                 # acknowledge
                 self.conn.send(b"OK")
                 received = 0
-                self.progress['value'] = 0
-                self.progress_label.config(text=f"Downloading {fname}")
+                self.ui(self.progress.configure, value=0)
+                self.ui(self.progress_label.config, text=f"Downloading {fname}")
                 with open(save_path, "wb") as f:
                     while received < fsize:
                         chunk = self.conn.recv(min(BUFFER_SIZE, fsize - received))
@@ -260,13 +283,16 @@ class App:
                             break
                         f.write(chunk)
                         received += len(chunk)
-                        self.progress['value'] = int((received / fsize) * 100)
-                self.progress['value'] = 100
-                self.progress_label.config(text=f"Downloaded: {os.path.basename(save_path)} ✅")
-                messagebox.showinfo("Download", f"Saved to: {save_path}")
-                self.refresh_list()
+                        percent = int((received / fsize) * 100)
+                        if percent != self._last_progress:
+                            self._last_progress = percent
+                            self.ui(self.progress.configure, value=percent)
+                self.ui(self.progress.configure, value=100)
+                self.ui(self.progress_label.config, text=f"Downloaded: {os.path.basename(save_path)} ✅")
+                self.ui(messagebox.showinfo, "Download", f"Saved to: {save_path}")
+                self.ui(self.refresh_list)
             except Exception as ex:
-                messagebox.showerror("Download error", str(ex))
+                self.ui(messagebox.showerror, "Download error", str(ex))
 
         threading.Thread(target=worker_download, args=(filename, save_path), daemon=True).start()
 
