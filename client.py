@@ -2,7 +2,7 @@
 import socket
 import threading
 import tkinter as tk
-from tkinter import ttk, filedialog, messagebox
+from tkinter import ttk, filedialog, messagebox, simpledialog
 import os
 import time
 
@@ -281,6 +281,29 @@ class App:
 
 # ---------------- Run app ----------------
 root = tk.Tk()
+
+# Ask for server IP and port at startup (defaults pre-filled)
+try:
+    ip_input = simpledialog.askstring(
+        "Server Address",
+        "Enter server IPv4 address",
+        initialvalue=SERVER_HOST,
+        parent=root,
+    )
+    if ip_input:
+        SERVER_HOST = ip_input.strip()
+    port_input = simpledialog.askstring(
+        "Server Port",
+        "Enter server port",
+        initialvalue=str(SERVER_PORT),
+        parent=root,
+    )
+    if port_input and port_input.isdigit():
+        SERVER_PORT = int(port_input)
+except Exception:
+    # Fallback silently to defaults if dialogs fail
+    pass
+
 app = App(root)
 root.protocol("WM_DELETE_WINDOW", app.on_quit)
 root.mainloop()
