@@ -106,6 +106,26 @@ def handle_client(client_socket, addr):
                                 break
                             client_socket.sendall(bytes_read)
 
+            # DELETE<SEPARATOR>filename
+            elif header.startswith("DELETE"):
+                try:
+                    _, filename = header.split(SEPARATOR)
+                except Exception:
+                    client_socket.send("ERROR".encode())
+                    continue
+                path = os.path.join(FILES_DIR, filename)
+                if not os.path.exists(path):
+                    client_socket.send("ERROR".encode())
+                    continue
+
+                lock = _get_file_lock(filename)
+                with lock:
+                    try:
+                        os.remove(path)
+                        client_socket.send("OK".encode())
+                    except Exception:
+                        client_socket.send("ERROR".encode())
+
             # QUIT
             elif header == "QUIT":
                 break
@@ -124,6 +144,26 @@ def start_server():
     server.bind((SERVER_HOST, SERVER_PORT))
     server.listen(20)
     # Derive LAN IP for users to connect from other machines
+    try:
+        _tmp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        _tmp.connect(("8.8.8.8", 80))
+        lan_ip = _tmp.getsockname()[0]
+        _tmp.close()
+    except Exception:
+        lan_ip = "<unknown>"
+    print(f"🚀 Server listening on {SERVER_HOST}:{SERVER_PORT} (LAN IP: {lan_ip}:{SERVER_PORT})")
+    try:
+        while True:
+            client_sock, client_addr = server.accept()
+            t = threading.Thread(target=handle_client, args=(client_sock, client_addr), daemon=True)
+            t.start()
+    except KeyboardInterrupt:
+        print("\nShutting down server.")
+    finally:
+        server.close()
+
+if __name__ == "__main__":
+    start_server()
     try:
         _tmp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         _tmp.connect(("8.8.8.8", 80))
