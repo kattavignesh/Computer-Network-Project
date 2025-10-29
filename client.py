@@ -4,6 +4,7 @@ import tkinter as tk
 from tkinter import ttk, filedialog, messagebox, simpledialog
 import os
 import time
+from urllib.parse import unquote, quote
 
 SERVER_HOST = "127.0.0.1"
 SERVER_PORT = 5001
@@ -201,9 +202,14 @@ class App:
                 else:
                     idx_local = 0
                     for entry in data_str.split(","):
-                        if not entry.strip():
+                        entry = entry.strip()
+                        if not entry or "|" not in entry:
                             continue
-                        name, size = entry.split("|")
+                        try:
+                            name_enc, size = entry.split("|", 1)
+                        except ValueError:
+                            continue
+                        name = unquote(name_enc)
                         icon = ext_icon(name)
                         display = f"{icon}  {name}    ({human_size(int(size))})"
                         self.listbox.insert(tk.END, display)
@@ -232,7 +238,8 @@ class App:
             for idx, path in enumerate(paths, start=1):
                 filename = os.path.basename(path)
                 filesize = os.path.getsize(path)
-                header = f"UPLOAD{SEPARATOR}{filename}{SEPARATOR}{filesize}"
+                safe_name = quote(filename, safe="")
+                header = f"UPLOAD{SEPARATOR}{safe_name}{SEPARATOR}{filesize}"
                 try:
                     try:
                         self.conn.set_timeout(300)
@@ -303,7 +310,8 @@ class App:
                     self.conn.set_timeout(300)
                 except Exception:
                     pass
-                self.conn.send(f"DOWNLOAD{SEPARATOR}{filename}".encode())
+                safe_name = quote(filename, safe="")
+                self.conn.send(f"DOWNLOAD{SEPARATOR}{safe_name}".encode())
                 header = self.conn.recv(BUFFER_SIZE).decode()
                 if header == "ERROR":
                     self.ui(messagebox.showerror, "Error", "File not found on server.")
@@ -362,21 +370,23 @@ class App:
             return
 
         def worker_delete(name):
-            if not self.op_lock.acquire(timeout=1):
-                self.ui(messagebox.showinfo, "Busy", "Another operation is running. Try again.")
-                return
+            # Wait until socket is free to avoid silent no-op
+            self.op_lock.acquire()
             try:
                 try:
                     self.conn.set_timeout(300)
                 except Exception:
                     pass
-                self.conn.send(f"DELETE{SEPARATOR}{name}".encode())
+                self.ui(self.progress_label.config, text=f"Deleting {name}...")
+                safe_name = quote(name, safe="")
+                self.conn.send(f"DELETE{SEPARATOR}{safe_name}".encode())
                 resp = self.conn.recv(BUFFER_SIZE).decode()
                 if resp == "OK":
                     self.ui(messagebox.showinfo, "Deleted", f"Deleted '{name}' from server.")
-                    self.ui(self.refresh_list)
                 else:
-                    self.ui(messagebox.showerror, "Delete failed", f"Could not delete '{name}'.")
+                    self.ui(messagebox.showerror, "Delete failed", f"Server response: {resp}")
+                # Always refresh to reflect server state
+                self.ui(self.refresh_list)
             except Exception as ex:
                 self.ui(messagebox.showerror, "Delete error", str(ex))
             finally:
