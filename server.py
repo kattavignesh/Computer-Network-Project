@@ -123,7 +123,15 @@ def start_server():
     server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     server.bind((SERVER_HOST, SERVER_PORT))
     server.listen(20)
-    print(f"🚀 Server listening on {SERVER_HOST}:{SERVER_PORT}")
+    # Derive LAN IP for users to connect from other machines
+    try:
+        _tmp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        _tmp.connect(("8.8.8.8", 80))
+        lan_ip = _tmp.getsockname()[0]
+        _tmp.close()
+    except Exception:
+        lan_ip = "<unknown>"
+    print(f"🚀 Server listening on {SERVER_HOST}:{SERVER_PORT} (LAN IP: {lan_ip}:{SERVER_PORT})")
     try:
         while True:
             client_sock, client_addr = server.accept()
