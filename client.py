@@ -128,6 +128,7 @@ class App:
         ttk.Button(right, text="Refresh", command=self.refresh_list).pack(pady=8, ipadx=6)
         ttk.Button(right, text="Download", command=self.download_selected).pack(pady=8, ipadx=6)
         ttk.Button(right, text="Upload Files", command=self.upload_files).pack(pady=8, ipadx=6)
+        ttk.Button(right, text="Delete", command=self.delete_selected).pack(pady=8, ipadx=6)
         ttk.Button(right, text="Quit", command=self.on_quit).pack(pady=8, ipadx=6)
 
         # Progress area
@@ -301,6 +302,37 @@ class App:
                 self.ui(messagebox.showerror, "Download error", str(ex))
 
         threading.Thread(target=worker_download, args=(filename, save_path), daemon=True).start()
+
+    def delete_selected(self):
+        if not self.conn.connected:
+            messagebox.showwarning("Not connected", "Server not available yet.")
+            return
+        sel = self.listbox.curselection()
+        if not sel:
+            messagebox.showwarning("Select file", "Choose a file to delete from the list.")
+            return
+        idx = sel[0]
+        filename = self.file_map.get(idx)
+        if not filename:
+            messagebox.showerror("Error", "Filename mapping not found!")
+            return
+
+        if not messagebox.askyesno("Confirm Delete", f"Delete '{filename}' from server?"):
+            return
+
+        def worker_delete(name):
+            try:
+                self.conn.send(f"DELETE{SEPARATOR}{name}".encode())
+                resp = self.conn.recv(BUFFER_SIZE).decode()
+                if resp == "OK":
+                    self.ui(messagebox.showinfo, "Deleted", f"Deleted '{name}' from server.")
+                    self.ui(self.refresh_list)
+                else:
+                    self.ui(messagebox.showerror, "Delete failed", f"Could not delete '{name}'.")
+            except Exception as ex:
+                self.ui(messagebox.showerror, "Delete error", str(ex))
+
+        threading.Thread(target=worker_delete, args=(filename,), daemon=True).start()
 
     def on_quit(self):
         try:
