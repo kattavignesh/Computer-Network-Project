@@ -1,4 +1,3 @@
-# client.py
 import socket
 import threading
 import tkinter as tk
@@ -50,8 +49,8 @@ class Connection:
                     self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                     self.sock.connect((self.host, self.port))
                     try:
-                        # avoid blocking the GUI if server stalls
-                        self.sock.settimeout(5)
+                        # allow long operations; avoid premature timeouts
+                        self.sock.settimeout(60)
                     except Exception:
                         pass
                     self.connected = True
@@ -86,6 +85,11 @@ class Connection:
                 pass
             self.connected = False
 
+    def set_timeout(self, seconds):
+        with self.lock:
+            if self.sock:
+                self.sock.settimeout(seconds)
+
 # ---------------- GUI Application ----------------
 class App:
     def __init__(self, root):
@@ -102,6 +106,10 @@ class App:
 
         # small helper to safely update UI from worker threads
         self.ui = lambda fn, *a, **k: self.root.after(0, lambda: fn(*a, **k))
+
+        # serialize operations on single socket
+        self.op_lock = threading.Lock()
+        self.connected_once = False
 
         self.setup_ui()
         self.poll_connection()
@@ -153,8 +161,9 @@ class App:
         if self.conn.connected:
             self.status.config(text="Status: Connected to server")
             self.server_addr.config(text=f"Server: {self.conn.host}:{self.conn.port}")
-            # auto refresh shortly after connected
-            self.refresh_list()
+            if not self.connected_once and not self.op_lock.locked():
+                self.connected_once = True
+                self.refresh_list()
         else:
             self.status.config(text="Status: Server offline — retrying...")
             self.server_addr.config(text=f"Server: {self.conn.host}:{self.conn.port}")
@@ -168,6 +177,8 @@ class App:
     # ---------------- Actions ----------------
     def refresh_list(self):
         if self.refreshing:
+            return
+        if self.op_lock.locked():
             return
         if not self.conn.connected:
             messagebox.showwarning("Not connected", "Server not available yet.")
@@ -214,12 +225,19 @@ class App:
             return
 
         def worker(paths):
+            if not self.op_lock.acquire(timeout=1):
+                self.ui(messagebox.showinfo, "Busy", "Another operation is running. Try again.")
+                return
             total_files = len(paths)
             for idx, path in enumerate(paths, start=1):
                 filename = os.path.basename(path)
                 filesize = os.path.getsize(path)
                 header = f"UPLOAD{SEPARATOR}{filename}{SEPARATOR}{filesize}"
                 try:
+                    try:
+                        self.conn.set_timeout(300)
+                    except Exception:
+                        pass
                     self.conn.send(header.encode())
                     ready = self.conn.recv(BUFFER_SIZE).decode()
                     if ready != "READY":
@@ -243,9 +261,17 @@ class App:
                     time.sleep(0.2)
                 except Exception as ex:
                     self.ui(messagebox.showerror, "Upload error", f"{filename}\n{ex}")
-                    return
+                    break
             self.ui(self.progress_label.config, text="All uploads completed ✅")
             self.ui(self.refresh_list)
+            try:
+                self.conn.set_timeout(60)
+            except Exception:
+                pass
+            try:
+                self.op_lock.release()
+            except RuntimeError:
+                pass
 
         threading.Thread(target=worker, args=(filepaths,), daemon=True).start()
 
@@ -259,7 +285,6 @@ class App:
             return
 
         idx = sel[0]
-        # use mapping to get real filename
         filename = self.file_map.get(idx)
         if not filename:
             messagebox.showerror("Error", "Filename mapping not found!")
@@ -270,12 +295,19 @@ class App:
             return
 
         def worker_download(filename, save_path):
+            if not self.op_lock.acquire(timeout=1):
+                self.ui(messagebox.showinfo, "Busy", "Another operation is running. Try again.")
+                return
             try:
+                try:
+                    self.conn.set_timeout(300)
+                except Exception:
+                    pass
                 self.conn.send(f"DOWNLOAD{SEPARATOR}{filename}".encode())
                 header = self.conn.recv(BUFFER_SIZE).decode()
                 if header == "ERROR":
                     self.ui(messagebox.showerror, "Error", "File not found on server.")
-                    return
+                    raise RuntimeError("File not found on server")
                 fname, fsize = header.split(SEPARATOR)
                 fsize = int(fsize)
                 # acknowledge
@@ -300,6 +332,15 @@ class App:
                 self.ui(self.refresh_list)
             except Exception as ex:
                 self.ui(messagebox.showerror, "Download error", str(ex))
+            finally:
+                try:
+                    self.conn.set_timeout(60)
+                except Exception:
+                    pass
+                try:
+                    self.op_lock.release()
+                except RuntimeError:
+                    pass
 
         threading.Thread(target=worker_download, args=(filename, save_path), daemon=True).start()
 
@@ -321,7 +362,14 @@ class App:
             return
 
         def worker_delete(name):
+            if not self.op_lock.acquire(timeout=1):
+                self.ui(messagebox.showinfo, "Busy", "Another operation is running. Try again.")
+                return
             try:
+                try:
+                    self.conn.set_timeout(300)
+                except Exception:
+                    pass
                 self.conn.send(f"DELETE{SEPARATOR}{name}".encode())
                 resp = self.conn.recv(BUFFER_SIZE).decode()
                 if resp == "OK":
@@ -331,8 +379,15 @@ class App:
                     self.ui(messagebox.showerror, "Delete failed", f"Could not delete '{name}'.")
             except Exception as ex:
                 self.ui(messagebox.showerror, "Delete error", str(ex))
-
-        threading.Thread(target=worker_delete, args=(filename,), daemon=True).start()
+            finally:
+                try:
+                    self.conn.set_timeout(60)
+                except Exception:
+                    pass
+                try:
+                    self.op_lock.release()
+                except RuntimeError:
+                    pass
 
     def on_quit(self):
         try:
